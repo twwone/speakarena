@@ -773,29 +773,62 @@ function Panel({ title, zh, right, children, className = '' }) {
 /* =========================================================
    元件
    ========================================================= */
-function Header({ seconds, phase, target, onSettings, engineLabel }) {
+const VIEWS = [
+  { id: 'prep', n: '1', label: '準備', hint: '評分標準・簡報' },
+  { id: 'stage', n: '2', label: '上台', hint: '錄音・翻頁' },
+  { id: 'review', n: '3', label: '講評', hint: '分數・評審' },
+];
+
+function TabButton({ v, active, onClick, badge, compact }) {
+  return (
+    <button type="button" onClick={onClick} aria-current={active ? 'page' : undefined}
+      className={`relative flex items-center justify-center gap-2 border-2 border-black font-body font-black transition-[transform,box-shadow] duration-100
+        ${compact ? 'flex-col gap-0 py-1.5 text-sm' : `px-4 py-2 text-base ${active ? '' : 'hover:translate-x-[2px] hover:translate-y-[2px] hover:shadow-none'}`}
+        ${active ? 'bg-black text-gold' : `bg-white text-black ${compact ? '' : hard4}`}`}>
+      <span className={`font-mono ${compact ? 'text-[11px]' : 'text-sm'} ${active ? 'text-gold' : 'opacity-60'}`}>{v.n}</span>
+      <span>{v.label}</span>
+      {badge && <span className={`absolute -top-2 -right-2 border-2 border-black px-1 font-mono text-[11px] leading-tight ${badge.cls}`}>{badge.text}</span>}
+    </button>
+  );
+}
+
+function Header({ seconds, phase, target, onSettings, engineLabel, view, setView, badges }) {
   const live = phase === 'live';
   const over = target && seconds > target * 60;
   return (
-    <header className="border-b-2 border-black bg-white">
-      <div className="mx-auto max-w-7xl flex items-center justify-between gap-3 py-3" style={gutter}>
+    <header className="sticky top-0 z-30 border-b-2 border-black bg-white" style={{ top: 'env(safe-area-inset-top, 0px)' }}>
+      <div className="mx-auto max-w-7xl flex items-center justify-between gap-3 py-2.5" style={gutter}>
         <div className="flex items-center gap-3 min-w-0">
-          <div className="hidden min-[400px]:grid place-items-center w-11 h-11 bg-black text-gold font-display text-xl border-2 border-black shrink-0">S</div>
+          <div className="hidden min-[400px]:grid place-items-center w-10 h-10 bg-black text-gold font-display text-xl border-2 border-black shrink-0">S</div>
           <div className="min-w-0">
-            <h1 className="font-display text-lg sm:text-3xl leading-none tracking-tight uppercase truncate">SpeakArena</h1>
-            <p className="font-body font-black text-sm leading-tight mt-1">演講擂台</p>
+            <h1 className="font-display text-lg lg:text-2xl leading-none tracking-tight uppercase truncate">SpeakArena</h1>
+            <p className="font-body font-black text-xs lg:text-sm leading-tight mt-1">演講擂台</p>
           </div>
         </div>
-        <div className="flex items-center gap-2 sm:gap-3 shrink-0">
-          <button type="button" onClick={onSettings} className={`${smallBtn} bg-white hidden sm:block`}>⚙ {engineLabel}</button>
-          <button type="button" onClick={onSettings} className={`${smallBtn} bg-white sm:hidden`} aria-label="設定">⚙</button>
-          <div className={`flex items-center gap-2 sm:gap-3 border-2 border-black px-2 sm:px-4 py-1.5 ${hard4} ${live ? (over ? 'bg-black text-alarm' : 'bg-alarm text-white') : 'bg-white'}`}>
+        <nav className="hidden md:flex items-center gap-3" aria-label="步驟">
+          {VIEWS.map(v => <TabButton key={v.id} v={v} active={view === v.id} onClick={() => setView(v.id)} badge={badges[v.id]} />)}
+        </nav>
+        <div className="flex items-center gap-2 lg:gap-3 shrink-0">
+          <button type="button" onClick={onSettings} className={`${smallBtn} bg-white hidden lg:block`}>⚙ {engineLabel}</button>
+          <button type="button" onClick={onSettings} className={`${smallBtn} bg-white lg:hidden`} aria-label="設定">⚙</button>
+          <div className={`flex items-center gap-2 border-2 border-black px-2 lg:px-3 py-1 ${hard4} ${live ? (over ? 'bg-black text-alarm' : 'bg-alarm text-white') : 'bg-white'}`}>
             <span className={`w-3 h-3 border-2 border-black ${live ? 'bg-white blink' : 'bg-paper'}`} aria-hidden="true"></span>
-            <span className="font-mono text-2xl sm:text-5xl tabular-nums leading-none">{fmt(seconds)}</span>
+            <span className="font-mono text-2xl lg:text-4xl tabular-nums leading-none">{fmt(seconds)}</span>
           </div>
         </div>
       </div>
     </header>
+  );
+}
+
+function BottomNav({ view, setView, badges }) {
+  return (
+    <nav className="md:hidden fixed bottom-0 inset-x-0 z-30 bg-white border-t-2 border-black" aria-label="步驟"
+      style={{ paddingBottom: 'max(8px, env(safe-area-inset-bottom, 0px))', paddingTop: 8, paddingLeft: 'max(12px, env(safe-area-inset-left, 0px))', paddingRight: 'max(12px, env(safe-area-inset-right, 0px))' }}>
+      <div className="grid grid-cols-3 gap-2">
+        {VIEWS.map(v => <TabButton key={v.id} v={v} compact active={view === v.id} onClick={() => setView(v.id)} badge={badges[v.id]} />)}
+      </div>
+    </nav>
   );
 }
 
@@ -842,10 +875,13 @@ function MicBox({ live, level, small }) {
 function SlideViewer({ deck, idx, setIdx, live, slideSec }) {
   const it = deck.items[idx];
   const n = deck.items.length;
+  const [ar, setAr] = useState(16 / 9);
   return (
     <div className="flex flex-col gap-3">
-      <div className="relative bg-paper border-2 border-black aspect-video w-full max-w-full overflow-hidden grid place-items-center">
-        <img src={it.url} alt={`第 ${it.page} 頁投影片`} className="max-w-full max-h-full object-contain" />
+      <div className="relative bg-paper border-2 border-black w-full overflow-hidden grid place-items-center"
+        style={{ aspectRatio: ar, maxHeight: 'max(200px, calc(100dvh - 330px))' }}>
+        <img src={it.url} alt={`第 ${it.page} 頁投影片`} className="max-w-full max-h-full object-contain"
+          onLoad={e => { const im = e.currentTarget; if (im.naturalWidth) setAr(im.naturalWidth / im.naturalHeight); }} />
         <span className="absolute top-0 left-0 bg-black text-gold font-mono text-sm px-2 py-1">{it.page} / {n}</span>
         {live && <span className="absolute top-0 right-0 bg-alarm text-white font-mono text-sm px-2 py-1 border-l-2 border-b-2 border-black tabular-nums">本頁 {fmt(slideSec)}</span>}
       </div>
@@ -858,11 +894,36 @@ function SlideViewer({ deck, idx, setIdx, live, slideSec }) {
   );
 }
 
-function Stage({ phase, onToggle, analyser, target, setTarget, micError, liveText, level, deck, slideIdx, setSlideIdx, slideSec, aiTranscribe }) {
-  const live = phase === 'live', judging = phase === 'judging';
+function JudgeStatus({ cards }) {
   return (
-    <section className="flex flex-col gap-6">
-      <div className={`bg-white border-2 border-black ${hard6} flex flex-col`}>
+    <div className="border-2 border-black bg-white">
+      <div className="border-b-2 border-black px-3 py-1.5 bg-paper font-display text-xs tracking-widest uppercase">Judges</div>
+      {JUDGES.map((j, i) => {
+        const c = cards[i];
+        const st = { idle: '待命', listening: '聆聽中', waiting: '閱卷中', typing: '發言中', done: c.score != null ? `${c.score} 分` : '講完了' }[c.state];
+        return (
+          <div key={j.id} className={`flex items-center gap-2 px-3 py-1.5 ${i ? 'border-t-2 border-black' : ''}`}>
+            <span className={`grid place-items-center w-7 h-7 border-2 border-black ${j.bg} text-sm shrink-0`} aria-hidden="true">{j.emoji}</span>
+            <span className="font-body font-black text-sm flex-1 min-w-0 truncate">{j.name}</span>
+            <span className={`font-body font-black text-xs ${c.state === 'listening' || c.state === 'typing' ? 'blink' : c.state === 'idle' ? 'opacity-50' : ''}`}>{st}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function Stage({ phase, onToggle, analyser, target, setTarget, micError, liveText, level, deck, slideIdx, setSlideIdx, slideSec, aiTranscribe, cards, onPaste, onGoPrep }) {
+  const live = phase === 'live', judging = phase === 'judging';
+  const bigBtn = (
+    <button type="button" onClick={onToggle} disabled={judging}
+      className={`${pressable} w-full py-5 lg:py-7 font-body font-black text-2xl lg:text-3xl tracking-wide ${live ? 'bg-alarm text-white' : 'bg-[#FFD700] text-black'}`}>
+      {live ? '■ 結束並聽取講評' : judging ? '評審閱卷中…' : phase === 'done' ? '▶ 再上擂台' : '▶ 開始演講'}
+    </button>
+  );
+  return (
+    <section className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_320px] gap-6 items-start">
+      <div className={`bg-white border-2 border-black ${hard6} flex flex-col min-w-0`}>
         <div className="flex flex-wrap items-center justify-between gap-2 border-b-2 border-black px-4 py-2 bg-paper">
           <span className="font-display text-sm tracking-widest uppercase">Main Stage</span>
           <div className="flex items-center gap-2">
@@ -877,34 +938,37 @@ function Stage({ phase, onToggle, analyser, target, setTarget, micError, liveTex
           </div>
         </div>
         {deck ? (
-          <div className="flex flex-col gap-4 px-4 sm:px-6 py-5">
-            <SlideViewer deck={deck} idx={slideIdx} setIdx={setSlideIdx} live={live} slideSec={slideSec} />
-            <div className="flex items-center gap-4">
-              <MicBox live={live} level={level} small />
-              <div className="flex-1 min-w-0"><Waveform analyser={analyser} live={live} compact /></div>
-            </div>
-          </div>
+          <div className="px-3 sm:px-4 py-4"><SlideViewer deck={deck} idx={slideIdx} setIdx={setSlideIdx} live={live} slideSec={slideSec} /></div>
         ) : (
-          <div className="flex flex-col sm:flex-row items-center gap-6 sm:gap-8 px-6 py-8">
+          <div className="flex flex-col items-center justify-center gap-6 px-6 py-8 min-h-[220px] lg:min-h-[calc(100dvh-330px)]">
             <MicBox live={live} level={level} />
-            <div className="flex-1 w-full min-w-0"><Waveform analyser={analyser} live={live} /></div>
+            <div className="w-full max-w-xl"><Waveform analyser={analyser} live={live} /></div>
+            {!live && <button type="button" onClick={onGoPrep} className="font-body font-black text-sm underline underline-offset-4 decoration-2">有簡報？到「準備」上傳，上台時可以邊講邊翻頁</button>}
           </div>
         )}
-        <div className="border-t-2 border-black px-4 py-3 min-h-[3.5rem] font-body font-bold text-sm">
+        <div className="border-t-2 border-black px-4 py-3 min-h-[3.25rem] font-body font-bold text-sm">
           {micError ? <span className="text-alarm">{micError}</span>
             : live ? (liveText
                 ? <span className="line-clamp-2">{aiTranscribe && <span className="font-black opacity-60">即時字幕（粗略，講完由 AI 重新聽寫）：</span>}{liveText}</span>
                 : <span className="opacity-60">{aiTranscribe ? '錄音中。講完後 AI 會聽錄音寫出正確的逐字稿。' : SR ? '開始說話，逐字稿會即時出現在這裡……' : '正在錄音（這個瀏覽器不支援即時辨識，結束後可以貼上講稿）'}</span>)
-            : judging ? '評審正在閱卷，請稍候……'
-            : phase === 'done' ? '往下看評分表、逐頁講評與評審意見。修改後可以重新評比。'
-            : deck ? '開始後一邊講一邊翻頁，評審會記下每頁停留的時間與你在那頁講了什麼。'
-            : '先在下方填好評比重點、上傳簡報，再按開始。允許麥克風後，計時與錄音同時開始。'}
+            : judging ? '評審正在閱卷……'
+            : deck ? '按開始後一邊講一邊翻頁，評審會記下每頁停留的時間與你在那頁講了什麼。'
+            : '按開始後，計時與錄音同時開始。'}
         </div>
       </div>
-      <button type="button" onClick={onToggle} disabled={judging}
-        className={`${pressable} w-full py-6 sm:py-8 font-body font-black text-2xl sm:text-4xl tracking-wide ${live ? 'bg-alarm text-white' : 'bg-[#FFD700] text-black'}`}>
-        {live ? '■ 結束並聽取講評' : judging ? '評審閱卷中…' : phase === 'done' ? '▶ 再上擂台' : '▶ 開始演講'}
-      </button>
+      <aside className="flex flex-col gap-4 lg:sticky lg:top-[96px]">
+        {bigBtn}
+        {deck && (
+          <div className="flex items-center gap-3 border-2 border-black bg-white p-2">
+            <MicBox live={live} level={level} small />
+            <div className="flex-1 min-w-0"><Waveform analyser={analyser} live={live} compact /></div>
+          </div>
+        )}
+        <JudgeStatus cards={cards} />
+        {!live && !judging && (
+          <button type="button" onClick={onPaste} className={`${smallBtn} bg-white w-full py-2.5`}>不錄音？貼上講稿或上傳錄音檔</button>
+        )}
+      </aside>
     </section>
   );
 }
@@ -964,31 +1028,36 @@ function SlidesPanel({ deck, onFiles, onRemove, status, error, disabled, slideId
   );
 }
 
-function Prep({ rubric, setRubric, script, setScript, topic, setTopic, disabled, slidesPanel }) {
+function Prep({ rubric, setRubric, script, setScript, topic, setTopic, disabled, slidesPanel, onNext, deck }) {
   return (
     <div className="flex flex-col gap-6">
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
         <Panel title="Rubric" zh="評比重點" right={<span className="font-body font-black text-xs border-2 border-black px-2 py-0.5 bg-gold">評審以這裡為最高依據</span>}>
           <p className="font-body text-sm font-bold -mb-2">寫法自由，可以標比重。例如「內容 40%：觀點要有數據支持」。</p>
-          <textarea id="rubric" value={rubric} onChange={e => setRubric(e.target.value)} rows={11} disabled={disabled} className={field}></textarea>
+          <textarea id="rubric" value={rubric} onChange={e => setRubric(e.target.value)} disabled={disabled} className={field + ' h-[38vh] lg:h-[calc(100dvh-360px)] min-h-[220px] resize-none'}></textarea>
           <div className="flex flex-wrap gap-3">
             <button type="button" onClick={() => setRubric(DEFAULT_RUBRIC)} disabled={disabled} className={`${smallBtn} bg-white`}>實習競賽標準</button>
             <button type="button" onClick={() => setRubric(GENERIC_RUBRIC)} disabled={disabled} className={`${smallBtn} bg-white`}>一般演講</button>
             <button type="button" onClick={() => setRubric('')} disabled={disabled} className={`${smallBtn} bg-white`}>清空</button>
           </div>
         </Panel>
-        <Panel title="Script" zh="題目與講稿（選填）">
-          <div>
-            <label htmlFor="topic" className="font-body font-black text-sm block mb-1">題目／場合</label>
-            <input id="topic" value={topic} onChange={e => setTopic(e.target.value)} disabled={disabled} placeholder="例如：校外實習特色案例競賽複賽" className={field + ' py-2'} />
-          </div>
-          <div className="flex-1 flex flex-col">
-            <label htmlFor="script" className="font-body font-black text-sm block mb-1">事先準備的講稿：評審會比對你有沒有漏講或脫稿</label>
-            <textarea id="script" value={script} onChange={e => setScript(e.target.value)} rows={7} disabled={disabled} placeholder="沒有講稿可以留空。" className={field + ' flex-1'}></textarea>
-          </div>
-        </Panel>
+        <div className="flex flex-col gap-6 min-w-0">
+          {slidesPanel}
+          <Panel title="Script" zh="題目與講稿（選填）">
+            <div>
+              <label htmlFor="topic" className="font-body font-black text-sm block mb-1">題目／場合</label>
+              <input id="topic" value={topic} onChange={e => setTopic(e.target.value)} disabled={disabled} placeholder="例如：校外實習特色案例競賽複賽" className={field + ' py-2'} />
+            </div>
+            <div>
+              <label htmlFor="script" className="font-body font-black text-sm block mb-1">事先準備的講稿：評審會比對你有沒有漏講或脫稿</label>
+              <textarea id="script" value={script} onChange={e => setScript(e.target.value)} rows={4} disabled={disabled} placeholder="沒有講稿可以留空。" className={field}></textarea>
+            </div>
+          </Panel>
+        </div>
       </div>
-      {slidesPanel}
+      <button type="button" onClick={onNext} className={`${pressable} w-full py-4 font-body font-black text-xl bg-[#FFD700]`}>
+        準備好了，上台 ▶{deck ? `（${deck.items.length} 頁簡報）` : ''}
+      </button>
     </div>
   );
 }
@@ -1255,7 +1324,8 @@ function Settings({ open, onClose, settings, setSettings, isArtifact }) {
 function JudgeCard({ judge, state, text, score }) {
   const body = { idle: '等待選手上台。', listening: '聆聽分析中...', waiting: '閱卷中…' }[state];
   return (
-    <article className={`${judge.bg} ${judge.text} border-2 border-black rounded-none ${hard6} flex flex-col min-h-[33vh] max-h-[70vh] min-w-0`}>
+    <article className={`${judge.bg} ${judge.text} border-2 border-black rounded-none ${hard6} flex flex-col min-w-0
+      w-[86%] shrink-0 snap-start h-[58vh] lg:w-auto lg:shrink lg:h-[calc(100dvh-260px)] lg:min-h-[360px]`}>
       <div className="flex items-center gap-3 border-b-2 border-black p-3">
         <div className="grid place-items-center w-12 h-12 bg-white border-2 border-black text-2xl shrink-0" aria-hidden="true">{judge.emoji}</div>
         <div className="min-w-0">
@@ -1273,6 +1343,13 @@ function JudgeCard({ judge, state, text, score }) {
     </article>
   );
 }
+
+const REVIEW_TABS = [
+  { id: 'judges', label: '評審' },
+  { id: 'score', label: '評分表' },
+  { id: 'slides', label: '逐頁' },
+  { id: 'speech', label: '逐字稿' },
+];
 
 /* =========================================================
    App
@@ -1300,6 +1377,9 @@ function App() {
   const [segments, setSegments] = useState(null);
   const [slideSec, setSlideSec] = useState(0);
   const [source, setSource] = useState('');
+  const [view, setViewRaw] = useState(() => store.get('view', 'prep'));
+  const [reviewTab, setReviewTab] = useState('judges');
+  const setView = v => { setViewRaw(v); store.set('view', v); try { window.scrollTo({ top: 0 }); } catch (e) {} };
   const [script, setScript] = useState(() => store.get('script', ''));
   const [topic, setTopic] = useState(() => store.get('topic', ''));
   const [settings, setSettings] = useState(() => store.get('settings', { apiKey: '', model: GEMINI_MODELS[0].id, sendAudio: true }));
@@ -1310,8 +1390,8 @@ function App() {
   const rec = useRef({});
   const startAt = useRef(0);
   const resultsRef = useRef(null);
-  const live = useRef({ phase: 'idle', deck: null, idx: 0 });
-  live.current = { phase, deck, idx: slideIdx };
+  const live = useRef({ phase: 'idle', deck: null, idx: 0, view: 'prep' });
+  live.current = { phase, deck, idx: slideIdx, view };
 
   // 換頁：錄音中會記下時間點和當時逐字稿的位置
   function goSlide(i) {
@@ -1331,7 +1411,7 @@ function App() {
   // 方向鍵、PageUp/PageDown（簡報筆）翻頁
   useEffect(() => {
     const onKey = e => {
-      if (!live.current.deck || live.current.phase === 'judging') return;
+      if (!live.current.deck || live.current.phase === 'judging' || live.current.view !== 'stage') return;
       const tag = (e.target.tagName || '').toLowerCase();
       if (tag === 'input' || tag === 'textarea' || tag === 'select' || e.target.isContentEditable) return;
       if (['ArrowRight', 'ArrowDown', 'PageDown'].includes(e.key)) { e.preventDefault(); goSlide(live.current.idx + 1); }
@@ -1399,6 +1479,7 @@ function App() {
 
   async function startSpeech() {
     timers.current.forEach(clearTimeout); timers.current = [];
+    setView('stage');
     setMicError(''); setLiveText(''); setTranscript(''); setSource(''); setMetrics(null); setResult(null); setNotice('');
     if (audio?.url) URL.revokeObjectURL(audio.url);
     setAudio(null);
@@ -1465,6 +1546,7 @@ function App() {
   async function runJudging(text, m, audioBlob, segs, preNotice = '') {
     timers.current.forEach(clearTimeout); timers.current = [];
     setPhase('judging'); setResult(null); setNotice('');
+    setView('review'); setReviewTab('judges');
     setCards(JUDGES.map(() => ({ state: 'waiting', text: '', score: null })));
     const a = analyze(text, m);
     setMetrics(a);
@@ -1526,7 +1608,6 @@ function App() {
       delay += 350;
     });
     later(() => setPhase('done'), delay);
-    later(() => { try { resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (e) {} }, 400);
   }
 
   async function endSpeech() {
@@ -1546,6 +1627,7 @@ function App() {
     if (hasGemini && blob) {
       // 瀏覽器辨識不準 → 交給 Gemini 聽錄音重新寫逐字稿
       setPhase('judging'); setTranscript(''); setCards(JUDGES.map(() => ({ state: 'waiting', text: '', score: null })));
+      setView('review'); setReviewTab('judges');
       try {
         const tr = await aiTranscribe(blob);
         text = tr.text; src = 'ai'; r.timed = tr.segments;
@@ -1602,6 +1684,7 @@ function App() {
       return;
     }
     setPhase('judging'); setTranscript(''); setCards(JUDGES.map(() => ({ state: 'waiting', text: '', score: null })));
+    setView('review'); setReviewTab('judges');
     let text = '', pre = '';
     try { const tr = await aiTranscribe(file); text = tr.text; rec.current.timed = tr.segments; setSource('ai'); if (tr.truncated) pre = `錄音超過 ${fmt(MAX_AUDIO_SEC)}，AI 只聽寫了前段。`; }
     catch (e) { pre = `AI 聽寫失敗（${e.message}）。`; }
@@ -1614,45 +1697,97 @@ function App() {
   const avg = doneCards.length === 4 ? round1(doneCards.reduce((s, c) => s + c.score, 0) / 4) : null;
   const busy = phase === 'live' || phase === 'judging';
 
-  return (
-    <div className="grid-bg min-h-screen flex flex-col">
-      <Header seconds={seconds} phase={phase} target={target} onSettings={() => setShowSettings(true)} engineLabel={engineLabel} />
+  const total = result?.total;
+  const badges = {
+    prep: deck ? { text: `${deck.items.length}頁`, cls: 'bg-mint text-black' } : null,
+    stage: phase === 'live' ? { text: 'REC', cls: 'bg-alarm text-white' } : null,
+    review: phase === 'judging' ? { text: '…', cls: 'bg-gold text-black' } : total != null ? { text: String(total), cls: 'bg-gold text-black' } : avg != null ? { text: String(avg), cls: 'bg-gold text-black' } : null,
+  };
+  const tabs = REVIEW_TABS.filter(t => t.id !== 'slides' || deck);
+  const tabBadge = { judges: avg != null ? `${avg}` : '', score: total != null ? `${total}` : '', slides: '', speech: '' };
+  const banner = notice && (
+    <div className={`border-2 border-black p-3 font-body font-black ${/失敗|還沒/.test(notice) ? 'bg-alarm text-white' : 'bg-white'} ${hard4}`} role="status">{notice}</div>
+  );
 
-      <main className="flex-1 mx-auto w-full max-w-7xl py-8 flex flex-col gap-8" style={gutter}>
-        {!hasGemini && !isArtifact && phase === 'idle' && (
-          <div className={`flex flex-col sm:flex-row sm:items-center gap-3 justify-between bg-gold border-2 border-black p-4 ${hard4}`}>
-            <p className="font-body font-black">還沒接上 Google Gemini。設定 API 金鑰後，評審會依你的評比重點逐項打分，並直接聽你的錄音。</p>
-            <button type="button" onClick={() => setShowSettings(true)} className={`${smallBtn} bg-white shrink-0`}>⚙ 前往設定</button>
-          </div>
+  return (
+    <div className="grid-bg min-h-screen flex flex-col" data-phase={phase} data-view={view}>
+      <Header seconds={seconds} phase={phase} target={target} onSettings={() => setShowSettings(true)} engineLabel={engineLabel} view={view} setView={setView} badges={badges} />
+
+      <main className="flex-1 mx-auto w-full max-w-7xl pt-5 pb-28 md:pb-10 flex flex-col gap-5" style={gutter}>
+        {view === 'prep' && (
+          <>
+            {!hasGemini && !isArtifact && (
+              <div className={`flex flex-col sm:flex-row sm:items-center gap-3 justify-between bg-gold border-2 border-black p-3 ${hard4}`}>
+                <p className="font-body font-black text-sm">還沒接上 Google Gemini。設定 API 金鑰後，AI 會聽錄音寫逐字稿，並依你的評比重點逐項打分。</p>
+                <button type="button" onClick={() => setShowSettings(true)} className={`${smallBtn} bg-white shrink-0`}>⚙ 前往設定</button>
+              </div>
+            )}
+            <Prep rubric={rubric} setRubric={setRubric} script={script} setScript={setScript} topic={topic} setTopic={setTopic} disabled={busy} deck={deck}
+              onNext={() => setView('stage')}
+              slidesPanel={<SlidesPanel deck={deck} onFiles={onSlideFiles} onRemove={removeDeck} status={slideStatus} error={slideError} disabled={busy} slideIdx={slideIdx} setSlideIdx={i => setSlideIdx(i)} />} />
+          </>
         )}
-        <Stage phase={phase} onToggle={onToggle} analyser={analyser} target={target} setTarget={setTarget} micError={micError} liveText={liveText} level={level}
-          deck={deck} slideIdx={slideIdx} setSlideIdx={goSlide} slideSec={slideSec} aiTranscribe={hasGemini} />
-        <Prep rubric={rubric} setRubric={setRubric} script={script} setScript={setScript} topic={topic} setTopic={setTopic} disabled={busy}
-          slidesPanel={<SlidesPanel deck={deck} onFiles={onSlideFiles} onRemove={removeDeck} status={slideStatus} error={slideError} disabled={busy} slideIdx={slideIdx} setSlideIdx={i => setSlideIdx(i)} />} />
-        <Content phase={phase} audio={audio} transcript={transcript} setTranscript={t => { setTranscript(t); if (source !== 'manual' && !t) setSource(''); else if (!source) setSource('manual'); }} onJudge={judgeNow} metrics={metrics} sendAudio={settings.sendAudio} hasGemini={hasGemini}
-          isArtifact={isArtifact} source={source} onAudioFile={onAudioFile} onRetranscribe={retranscribe} />
-        {notice && <div className={`border-2 border-black p-3 font-body font-black ${/失敗|還沒/.test(notice) ? 'bg-alarm text-white' : 'bg-white'} ${hard4}`} role="status">{notice}</div>}
-        <div ref={resultsRef} className="flex flex-col gap-8">
-          <Results result={phase === 'judging' && !result ? null : result} engine={engine} />
-          <SlideReview deck={deck} review={result} segments={segments} onJump={i => { setSlideIdx(i); try { window.scrollTo({ top: 0, behavior: 'smooth' }); } catch (e) {} }} />
-        </div>
+
+        {view === 'stage' && (
+          <Stage phase={phase} onToggle={onToggle} analyser={analyser} target={target} setTarget={setTarget} micError={micError} liveText={liveText} level={level}
+            deck={deck} slideIdx={slideIdx} setSlideIdx={goSlide} slideSec={slideSec} aiTranscribe={hasGemini} cards={cards}
+            onPaste={() => { setView('review'); setReviewTab('speech'); }} onGoPrep={() => setView('prep')} />
+        )}
+
+        {view === 'review' && (
+          <>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex gap-2 overflow-x-auto pb-1 pr-1" role="tablist" aria-label="講評內容">
+                {tabs.map(t => (
+                  <button key={t.id} type="button" role="tab" aria-selected={reviewTab === t.id} onClick={() => setReviewTab(t.id)}
+                    className={`shrink-0 border-2 border-black px-3 py-1.5 font-body font-black text-sm flex items-center gap-1.5 ${reviewTab === t.id ? 'bg-black text-gold' : `bg-white ${hard4} hover:translate-x-[2px] hover:translate-y-[2px] hover:shadow-none transition-[transform,box-shadow] duration-100`}`}>
+                    {t.label}{tabBadge[t.id] && <span className={`font-mono text-xs px-1 ${reviewTab === t.id ? 'bg-gold text-black' : 'bg-paper'}`}>{tabBadge[t.id]}</span>}
+                  </button>
+                ))}
+              </div>
+              {engine && phase !== 'judging' && <span className="font-mono text-xs border-2 border-black px-2 py-0.5 bg-white">{engine}</span>}
+            </div>
+            {banner}
+
+            {reviewTab === 'judges' && (
+              <div className="flex gap-4 overflow-x-auto snap-x snap-mandatory pb-3 pr-[6px] lg:grid lg:grid-cols-4 lg:gap-5 lg:overflow-visible">
+                {JUDGES.map((j, i) => <JudgeCard key={j.id} judge={j} state={cards[i].state} text={cards[i].text} score={cards[i].score} />)}
+              </div>
+            )}
+            {reviewTab === 'judges' && <p className="lg:hidden font-body font-bold text-xs text-center opacity-70 -mt-2">← 左右滑動看四位評審 →</p>}
+
+            {reviewTab === 'score' && (result?.rubric?.length
+              ? <Results result={result} engine={engine} />
+              : <EmptyState phase={phase} onPaste={() => setReviewTab('speech')} onStage={() => setView('stage')} what="評分表" needAI={!!result} />)}
+
+            {reviewTab === 'slides' && (result?.slides?.length
+              ? <SlideReview deck={deck} review={result} segments={segments} onJump={i => { setSlideIdx(i); setView('stage'); }} />
+              : <EmptyState phase={phase} onPaste={() => setReviewTab('speech')} onStage={() => setView('stage')} what="逐頁講評" />)}
+
+            {reviewTab === 'speech' && (
+              <Content phase={phase} audio={audio} transcript={transcript} setTranscript={t => { setTranscript(t); if (source !== 'manual' && !t) setSource(''); else if (!source) setSource('manual'); }} onJudge={judgeNow} metrics={metrics} sendAudio={settings.sendAudio} hasGemini={hasGemini}
+                isArtifact={isArtifact} source={source} onAudioFile={onAudioFile} onRetranscribe={retranscribe} />
+            )}
+          </>
+        )}
       </main>
 
-      <section className="border-t-2 border-black bg-white">
-        <div className="mx-auto max-w-7xl py-6" style={gutter}>
-          <div className="flex flex-wrap items-end justify-between gap-2 mb-4">
-            <h2 className="font-display text-xl uppercase tracking-tight">Judges <span className="font-body font-black">評審席</span></h2>
-            {avg != null
-              ? <span className={`font-body font-black text-sm border-2 border-black px-3 py-1 bg-black text-gold ${hard4}`}>評審平均 <span className="font-mono text-lg">{avg}</span> / 10</span>
-              : <span className="font-mono text-xs border-2 border-black px-2 py-0.5 bg-paper">4 / 4 ON SEAT</span>}
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5 pr-[6px] pb-[6px]">
-            {JUDGES.map((j, i) => <JudgeCard key={j.id} judge={j} state={cards[i].state} text={cards[i].text} score={cards[i].score} />)}
-          </div>
-        </div>
-      </section>
-
+      <BottomNav view={view} setView={setView} badges={badges} />
       <Settings open={showSettings} onClose={() => setShowSettings(false)} settings={settings} setSettings={setSettings} isArtifact={isArtifact} />
+    </div>
+  );
+}
+
+function EmptyState({ phase, onPaste, onStage, what, needAI }) {
+  return (
+    <div className={`bg-white border-2 border-black ${hard6} p-6 flex flex-col items-center text-center gap-4`}>
+      <p className="font-body font-black text-lg">{phase === 'judging' ? `評審正在閱卷，${what}等一下就會出現。` : needAI ? `這次是數據評審，沒有${what}。接上 Gemini 後再評一次就會有。` : `還沒有${what}。`}</p>
+      {phase !== 'judging' && (
+        <div className="flex flex-wrap justify-center gap-3">
+          <button type="button" onClick={onStage} className={`${smallBtn} bg-gold`}>到「上台」開始演講</button>
+          <button type="button" onClick={onPaste} className={`${smallBtn} bg-white`}>貼上講稿或上傳錄音檔</button>
+        </div>
+      )}
     </div>
   );
 }
