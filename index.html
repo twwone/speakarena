@@ -556,9 +556,26 @@ async function gemini(path, apiKey, body) {
   try { data = await res.json(); } catch (e) {}
   if (!res.ok) {
     const msg = data?.error?.message || res.statusText || '';
-    const err = new Error(msg); err.status = res.status; err.raw = msg; throw err;
+    const err = new Error(msg); err.status = res.status; err.raw = msg;
+    // 429 時 Google 會告訴我們建議等幾秒（RetryInfo.retryDelay，例如 "12s"）
+    const info = (data?.error?.details || []).find(d => /RetryInfo$/.test(d['@type'] || ''));
+    if (info?.retryDelay) err.retryAfter = parseFloat(info.retryDelay) * 1000;
+    throw err;
   }
   return data;
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const RETRY_WAITS = window.SPEAKARENA_RETRY_WAITS || [3000, 8000, 15000];   // 測試時可以縮短
+// 這次失敗要不要等一下再試？回傳等待毫秒數，或 null 表示不重試
+function retryWait(e, attempt) {
+  if (attempt >= RETRY_WAITS.length) return null;
+  if (e.status === 429) {
+    if (e.retryAfter == null) return attempt < 1 ? 10000 : null;         // 沒說等多久：試一次就好
+    return e.retryAfter <= 30000 ? e.retryAfter + 1000 : null;          // 要等太久（多半是今天額度用完）就不等
+  }
+  if ([500, 502, 503, 504].includes(e.status)) return RETRY_WAITS[attempt] + Math.round(Math.random() * 1000);
+  return null;
 }
 
 function explainGeminiError(e, model) {
@@ -568,7 +585,7 @@ function explainGeminiError(e, model) {
   if (s === 403) return `這把金鑰不能使用 Gemini API，或所在地區／帳號受限。請到 AI Studio 重新建立金鑰。Google 回應：${m}`;
   if (s === 404) return `模型「${model}」不存在或已下架。Google 回應：${m}`;
   if (s === 429) return `額度用完或請求太頻繁，請等一分鐘再試，或在設定換成 Flash-Lite 模型。Google 回應：${m}`;
-  if (s >= 500) return `Google 伺服器忙碌（${s}），請稍後再試。`;
+  if (s >= 500) return `Google 的 Gemini 伺服器忙碌（${s}），已自動重試並換過模型仍失敗。請過一兩分鐘再試。`;
   return `錯誤 ${s}：${m}`;
 }
 
@@ -580,10 +597,11 @@ async function listGeminiModels(apiKey) {
     .map(m => ({ id: m.name.replace(/^models\//, ''), label: m.displayName || m.name }))
     .filter(m => /gemini/i.test(m.id) && !/(embedding|aqa|image|tts|live|audio|robotics|computer|thinking-exp)/i.test(m.id));
 }
-function pickModel(list) {
+function rankModels(list) {
   const rank = m => (/flash/i.test(m.id) ? 0 : 2) + (/lite/i.test(m.id) ? 0.5 : 0) + (/preview|exp/i.test(m.id) ? 1 : 0);
-  return [...list].sort((a, b) => rank(a) - rank(b) || b.id.localeCompare(a.id, 'en', { numeric: true }))[0];
+  return [...list].sort((a, b) => rank(a) - rank(b) || b.id.localeCompare(a.id, 'en', { numeric: true }));
 }
+const pickModel = list => rankModels(list)[0];
 
 async function geminiReview({ apiKey, model, promptFor, deck, audioBlob, onStatus, onModelChange }) {
   const parts = [];
@@ -616,21 +634,40 @@ async function geminiReview({ apiKey, model, promptFor, deck, audioBlob, onStatu
   return geminiJson({ apiKey, model, body, onStatus, onModelChange, doing: '評審閱卷中' });
 }
 
-// 呼叫 Gemini 並取回 JSON；模型下架（404）時自動換成這把金鑰能用的模型重試
+// 呼叫 Gemini 並取回 JSON。
+// 伺服器忙碌（500/503）或太頻繁（429）→ 等幾秒自動重試；一直忙就換這把金鑰能用的其他模型。
+// 模型下架（404）→ 換模型，並記住新模型。
 async function geminiJson({ apiKey, model, body, onStatus, onModelChange, doing }) {
+  const call = async m => {
+    for (let attempt = 0; ; attempt++) {
+      try { return await gemini(`models/${encodeURIComponent(m)}:generateContent`, apiKey, body); }
+      catch (e) {
+        const wait = retryWait(e, attempt);
+        if (wait == null) throw e;
+        onStatus(`Google 伺服器忙碌（${e.status}），${Math.round(wait / 1000)} 秒後自動重試（第 ${attempt + 1} 次）…`);
+        await sleep(wait);
+      }
+    }
+  };
   let data;
-  try {
-    data = await gemini(`models/${encodeURIComponent(model)}:generateContent`, apiKey, body);
-  } catch (e) {
-    if (e.status !== 404) throw new Error(explainGeminiError(e, model));
-    onStatus(`模型 ${model} 不能用，自動尋找可用的模型…`);
-    let alt;
-    try { alt = pickModel((await listGeminiModels(apiKey)).filter(m => m.id !== model)); } catch (e2) { throw new Error(explainGeminiError(e2, model)); }
-    if (!alt) throw new Error(explainGeminiError(e, model));
-    onModelChange && onModelChange(alt.id);
-    onStatus(`改用 ${alt.id}，${doing}…`);
-    try { data = await gemini(`models/${encodeURIComponent(alt.id)}:generateContent`, apiKey, body); }
-    catch (e3) { throw new Error(explainGeminiError(e3, alt.id)); }
+  try { data = await call(model); }
+  catch (e) {
+    const busy = e.status === 429 || e.status >= 500;
+    if (e.status !== 404 && !busy) throw new Error(explainGeminiError(e, model));
+    onStatus(e.status === 404 ? `模型 ${model} 不能用，自動尋找可用的模型…` : `模型 ${model} 一直忙碌，改用其他模型…`);
+    let alts;
+    try { alts = rankModels((await listGeminiModels(apiKey)).filter(m => m.id !== model)).slice(0, 2); }
+    catch (e2) { throw new Error(explainGeminiError(e, model)); }
+    let last = e;
+    for (const alt of alts) {
+      onStatus(`改用 ${alt.id}，${doing}…`);
+      try {
+        data = await call(alt.id);
+        if (e.status === 404) onModelChange && onModelChange(alt.id);   // 只有下架才永久換；忙碌只是這次借用
+        break;
+      } catch (e3) { last = e3; if (!(e3.status === 429 || e3.status >= 500 || e3.status === 404)) break; }
+    }
+    if (!data) throw new Error(explainGeminiError(last, model));
   }
   const cand = data?.candidates?.[0];
   const text = (cand?.content?.parts || []).filter(p => !p.thought && p.text).map(p => p.text).join('');
@@ -638,28 +675,84 @@ async function geminiJson({ apiKey, model, body, onStatus, onModelChange, doing 
   return parseJsonLoose(text);
 }
 
-/* ---------- Gemini 聽寫逐字稿：比瀏覽器內建辨識準很多，並附每段開始的秒數 ---------- */
+/* ---------- Gemini 聽寫逐字稿：比瀏覽器內建辨識準很多，並附每段開始的秒數 ----------
+   長錄音切成約 2 分鐘一段（切在最安靜的地方），分段聽寫：
+   每段請求小、比較不會被 Google 拒絕，某一段失敗也不會整份重來。 */
+const CHUNK_SEC = 120;
+
+function splitPoints(pcm, rate, total) {
+  const cuts = [0];
+  const frame = Math.round(rate * 0.25);
+  for (let t = CHUNK_SEC; t < total - 30; t += CHUNK_SEC) {
+    let best = t, bestRms = Infinity;
+    for (let c = Math.max(cuts[cuts.length - 1] + 30, t - 10); c <= Math.min(total - 5, t + 10); c += 0.25) {
+      const i0 = Math.round(c * rate);
+      let sum = 0; for (let k = i0; k < i0 + frame && k < pcm.length; k++) sum += pcm[k] * pcm[k];
+      const r = Math.sqrt(sum / frame);
+      if (r < bestRms) { bestRms = r; best = c; }
+    }
+    cuts.push(best);
+  }
+  return cuts.map((from, k) => ({ from, to: k + 1 < cuts.length ? cuts[k + 1] : total }));
+}
+
+async function encodePiece(pcm, rate) {
+  try { return { blob: await encodeMp3(pcm, rate), mime: 'audio/mp3' }; }
+  catch (e) { return { blob: encodeWav(pcm, rate), mime: 'audio/wav' }; }
+}
+
 async function transcribeWithGemini({ apiKey, model, audioBlob, hints, onStatus, onModelChange }) {
-  const au = await prepareAudio(audioBlob, GEMINI_INLINE_LIMIT / 1.37 - 200 * 1024, onStatus);
-  const prompt = `請把這段演講錄音逐字聽寫成繁體中文（台灣用語）。
+  onStatus('整理錄音中…');
+  const d = await decodeMono(audioBlob, 16000);
+  const pieces = splitPoints(d.pcm, d.rate, d.seconds);
+  const n = pieces.length;
+  const results = new Array(n), failed = [];
+  let done = 0, lastErr = null;
+  const tell = () => onStatus(n > 1 ? `AI 正在聽寫逐字稿…（${fmt(d.seconds)} 的錄音，分 ${n} 段，已完成 ${done} 段）` : `AI 正在聽寫逐字稿…（${fmt(d.seconds)} 的錄音，約 10–40 秒）`);
+  tell();
+
+  const one = async k => {
+    const { from, to } = pieces[k];
+    const au = await encodePiece(d.pcm.subarray(Math.floor(from * d.rate), Math.floor(to * d.rate)), d.rate);
+    const prompt = `請把這段演講錄音逐字聽寫成繁體中文（台灣用語）。${n > 1 ? `\n這是整場演講的第 ${k + 1}／${n} 段（整場第 ${fmt(from)}–${fmt(to)}），開頭或結尾可能剛好切在句子中間，照聽到的寫就好。` : ''}
 規則：
 1. 照實寫下講者說的每一句話，包含口頭禪（嗯、呃、然後、就是、那個）、重複、說錯又改口的地方。不要潤飾、不要摘要、不要自己補字。
 2. 加上適當的中文標點符號。
-3. 依講話的自然段落切段，每段 1–3 句，標出這段開始的時間（從錄音開頭算起的秒數，數字）。
+3. 依講話的自然段落切段，每段 1–3 句，標出這段開始的時間（從「這段錄音」開頭算起的秒數，數字）。
 4. 沒有人說話、只有雜音的部分不用寫。
 ${hints ? `5. 這場演講可能出現的專有名詞（只用來幫你聽對字，沒講到就不要寫進去）：\n${hints}\n` : ''}
 只輸出 JSON：{"segments":[{"start":0,"text":"..."}]}`;
-  const body = {
-    contents: [{ role: 'user', parts: [{ inline_data: { mime_type: au.mime, data: au.b64 } }, { text: prompt }] }],
-    generationConfig: { responseMimeType: 'application/json', temperature: 0 },
+    const body = {
+      contents: [{ role: 'user', parts: [{ inline_data: { mime_type: au.mime, data: await blobToBase64(au.blob) } }, { text: prompt }] }],
+      generationConfig: { responseMimeType: 'application/json', temperature: 0 },
+    };
+    try {
+      const r = await geminiJson({
+        apiKey, model, body, onModelChange, doing: '聽寫逐字稿',
+        onStatus: msg => onStatus(n > 1 ? `第 ${k + 1}／${n} 段：${msg}` : msg),
+      });
+      results[k] = (Array.isArray(r?.segments) ? r.segments : [])
+        .map(x => ({ start: from + clamp(Number(x.start) || 0, 0, to - from), text: String(x.text || '').trim() }))
+        .filter(x => x.text);
+    } catch (e) {
+      lastErr = e; failed.push(k);
+      results[k] = [{ start: from, text: `〔${fmt(from)}–${fmt(to)} 這段聽寫失敗〕`, failed: true }];
+    }
+    done++; tell();
   };
-  onStatus(`AI 正在聽寫逐字稿…（${fmt(au.seconds)} 的錄音，約 10–40 秒）`);
-  const r = await geminiJson({ apiKey, model, body, onStatus, onModelChange, doing: '聽寫逐字稿' });
-  const segments = (Array.isArray(r?.segments) ? r.segments : [])
-    .map(x => ({ start: Math.max(0, Number(x.start) || 0), text: String(x.text || '').trim() }))
-    .filter(x => x.text).sort((a, b) => a.start - b.start);
-  if (!segments.length) throw new Error('AI 沒有聽到任何說話內容');
-  return { segments, text: segments.map(x => x.text).join(''), truncated: au.truncated, seconds: au.seconds };
+
+  // 同時最多送 2 段，避免一次太多請求被 Google 擋
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(2, n) }, async () => { while (next < n) await one(next++); }));
+
+  if (failed.length === n) throw lastErr || new Error('AI 聽寫失敗');
+  const segments = results.flat().sort((a, b) => a.start - b.start);
+  if (!segments.some(x => !x.failed)) throw new Error('AI 沒有聽到任何說話內容');
+  return {
+    segments, text: segments.map(x => x.text).join(''),
+    truncated: d.fullSeconds > d.seconds + 0.5, seconds: d.seconds,
+    failedParts: failed.sort((a, b) => a - b).map(k => `${fmt(pieces[k].from)}–${fmt(pieces[k].to)}`),
+  };
 }
 
 /* =========================================================
@@ -1461,6 +1554,12 @@ function App() {
     const hints = [topic.trim(), deck ? deck.items.map(x => x.text).join(' ').replace(/\s+/g, ' ').slice(0, 1500) : '', script.trim().slice(0, 800)].filter(Boolean).join('\n');
     return transcribeWithGemini({ apiKey: settings.apiKey, model: settings.model, audioBlob: blob, hints, onStatus: setNotice, onModelChange: saveModel });
   }
+  function transcribeNote(tr) {
+    const notes = [];
+    if (tr.failedParts?.length) notes.push(`錄音 ${tr.failedParts.join('、')} 這${tr.failedParts.length > 1 ? '幾' : ''}段因為 Google 伺服器忙碌沒聽寫到，逐字稿裡有標示。可以到「逐字稿」按「AI 重新聽寫」補上。`);
+    if (tr.truncated) notes.push(`錄音超過 ${fmt(MAX_AUDIO_SEC)}，AI 只聽寫了前段。`);
+    return notes.join(' ');
+  }
   function slideSegsFor(r, duration, raw) {
     if (!deck || r.slideDeckId !== deck.id || !r.slideLog) return null;
     return r.timed ? buildSegmentsTimed(r.slideLog, duration, r.timed) : buildSegments(r.slideLog, duration, raw);
@@ -1631,8 +1730,8 @@ function App() {
       try {
         const tr = await aiTranscribe(blob);
         text = tr.text; src = 'ai'; r.timed = tr.segments;
-        if (tr.truncated) pre = `錄音超過 ${fmt(MAX_AUDIO_SEC)}，AI 只聽寫了前段。`;
-      } catch (e) { pre = `AI 聽寫失敗（${e.message}），先用瀏覽器辨識的逐字稿。`; }
+        pre = transcribeNote(tr);
+      } catch (e) { pre = `AI 聽寫失敗（${e.message}），先用瀏覽器辨識的逐字稿。可以到「逐字稿」按「AI 重新聽寫」。`; }
     }
     setTranscript(text); setSource(src);
     r.slideSegments = slideSegsFor(r, duration, raw);
@@ -1645,7 +1744,7 @@ function App() {
     let text = transcript, pre = '';
     if (!text.trim() && audio?.blob && hasGemini) {
       setPhase('judging'); setCards(JUDGES.map(() => ({ state: 'waiting', text: '', score: null })));
-      try { const tr = await aiTranscribe(audio.blob); text = tr.text; r.timed = tr.segments; setTranscript(text); setSource('ai'); r.slideSegments = slideSegsFor(r, m.duration, ''); }
+      try { const tr = await aiTranscribe(audio.blob); text = tr.text; r.timed = tr.segments; setTranscript(text); setSource('ai'); r.slideSegments = slideSegsFor(r, m.duration, ''); pre = transcribeNote(tr); }
       catch (e) { pre = `AI 聽寫失敗（${e.message}）。`; }
     }
     const segs = deck && r.slideDeckId === deck.id ? r.slideSegments : null;
@@ -1660,7 +1759,7 @@ function App() {
       const tr = await aiTranscribe(audio.blob);
       r.timed = tr.segments; setTranscript(tr.text); setSource('ai');
       if (r.lastMetrics) r.slideSegments = slideSegsFor(r, r.lastMetrics.duration, '');
-      setNotice('AI 聽寫完成。檢查一下逐字稿，再按「依目前內容重新評比」。');
+      setNotice(transcribeNote(tr) || 'AI 聽寫完成。檢查一下逐字稿，再按「依目前內容重新評比」。');
     } catch (e) { setNotice('AI 聽寫失敗：' + e.message); }
     setPhase(result ? 'done' : 'idle');
   }
@@ -1686,7 +1785,7 @@ function App() {
     setPhase('judging'); setTranscript(''); setCards(JUDGES.map(() => ({ state: 'waiting', text: '', score: null })));
     setView('review'); setReviewTab('judges');
     let text = '', pre = '';
-    try { const tr = await aiTranscribe(file); text = tr.text; rec.current.timed = tr.segments; setSource('ai'); if (tr.truncated) pre = `錄音超過 ${fmt(MAX_AUDIO_SEC)}，AI 只聽寫了前段。`; }
+    try { const tr = await aiTranscribe(file); text = tr.text; rec.current.timed = tr.segments; setSource('ai'); pre = transcribeNote(tr); }
     catch (e) { pre = `AI 聽寫失敗（${e.message}）。`; }
     setTranscript(text);
     runJudging(text, m, file, null, pre);
