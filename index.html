@@ -181,7 +181,7 @@ function buildPrompt({ text, a, rubric, script, topic, hasAudio, deck, segments,
    - logic「邏輯鐵壁」：論點、理由、例證、反方回應、結構層次。冷靜嚴謹。
    - rhythm「節奏大師」：語速、停頓、語調、音量、咬字、時間控制。
    - gentle「溫柔文膽」：用詞、口頭禪、修辭、畫面感與情感，示範改寫。溫柔但專業。
-7. 全部用繁體中文（台灣用語）。分數 0–10，可以有一位小數，要拉開差距，不要全部給 7 分。
+7. 全部用繁體中文（台灣用語）。分數 0–10，可以有一位小數，要拉開差距，不要全部給 7 分。引用講者原話時一律用中文引號「」，不要用英文雙引號。
 ${sl.rule}
 
 ## 使用者的評比重點
@@ -215,13 +215,88 @@ ${script ? `\n## 預先準備的講稿\n"""\n${script.trim()}\n"""\n` : ''}${sl.
 }`;
 }
 
-function parseJsonLoose(s) {
-  s = String(s || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '');
-  try { return JSON.parse(s); } catch (e) {}
-  const a = s.indexOf('{'), b = s.lastIndexOf('}');
-  if (a >= 0 && b > a) return JSON.parse(s.slice(a, b + 1));
-  throw new Error('評審回傳的格式無法解析');
+/* 修復 AI 回傳的「差一點點」的 JSON：
+   - 字串裡沒跳脫的英文雙引號（他說"然後"太多）
+   - 字串裡直接換行、Tab
+   - 多餘的結尾逗號
+   - 輸出被截斷（字串、陣列、物件沒收尾）
+   - 前後夾雜 ```json 或說明文字 */
+function repairJson(src) {
+  let s = String(src || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '');
+  const start = s.search(/[{[]/);
+  if (start > 0) s = s.slice(start);
+  let out = '', inStr = false;
+  const stack = [];
+  const nextSig = i => { for (let k = i; k < s.length; k++) { const c = s[k]; if (c !== ' ' && c !== '\n' && c !== '\r' && c !== '\t') return { c, k }; } return { c: '', k: s.length }; };
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (inStr) {
+      if (ch === '\\') { out += ch + (s[i + 1] ?? ''); i++; continue; }
+      if (ch === '"') {
+        // 這個引號是字串結尾嗎？看後面接的是不是 , } ] :（或檔案結束）
+        const { c, k } = nextSig(i + 1);
+        let closes = c === '' || c === '}' || c === ']' || c === ':';
+        if (c === ',') {
+          // 逗號後面要接下一個值或屬性才算結尾，否則是句子裡的逗號
+          const { c: n2, k: k2 } = nextSig(k + 1);
+          closes = n2 === '"' || n2 === '{' || n2 === '[' || n2 === '}' || n2 === ']' || n2 === ''
+            || /^(true|false|null|-?\d+(\.\d+)?([eE][-+]?\d+)?)\s*[,}\]]/.test(s.slice(k2, k2 + 40));
+        }
+        if (closes) { inStr = false; out += ch; } else out += '\\"';
+        continue;
+      }
+      if (ch === '\n') { out += '\\n'; continue; }
+      if (ch === '\r') continue;
+      if (ch === '\t') { out += '\\t'; continue; }
+      out += ch; continue;
+    }
+    if (ch === '"') { inStr = true; out += ch; continue; }
+    if (ch === '{' || ch === '[') { stack.push(ch === '{' ? '}' : ']'); out += ch; continue; }
+    if (ch === '}' || ch === ']') {
+      out = out.replace(/,\s*$/, '');                // 結尾逗號
+      if (stack.length && stack[stack.length - 1] === ch) stack.pop();
+      out += ch;
+      if (!stack.length) break;                      // 主體結束，後面的說明文字丟掉
+      continue;
+    }
+    out += ch;
+  }
+  // 被截斷：把沒收尾的字串、屬性、括號補上
+  if (inStr) out += '"';
+  out = out.replace(/,\s*$/, '').replace(/:\s*$/, ': null').replace(/,\s*"[^"]*"\s*$/, '');
+  while (stack.length) { out = out.replace(/,\s*$/, ''); out += stack.pop(); }
+  return out;
 }
+
+function parseJsonLoose(s) {
+  const raw = String(s || '').trim();
+  try { return JSON.parse(raw); } catch (e) {}
+  try { return JSON.parse(repairJson(raw)); } catch (e) {}
+  const err = new Error('評審回傳的格式無法解析');
+  err.badJson = true;
+  throw err;
+}
+
+/* 要求 Gemini 照固定格式回答（結構化輸出），從根本減少格式錯誤 */
+const TS = { type: 'STRING' }, TN = { type: 'NUMBER' };
+const obj = (properties, required = Object.keys(properties)) => ({ type: 'OBJECT', properties, required, propertyOrdering: Object.keys(properties) });
+function reviewSchema(withSlides) {
+  const judge = obj({ score: TN, text: TS });
+  const props = {
+    rubric: { type: 'ARRAY', items: obj({ criterion: TS, weight: TN, score: { type: 'NUMBER', nullable: true }, evidence: TS, comment: TS, fix: TS }) },
+    judges: obj({ jobs: judge, logic: judge, rhythm: judge, gentle: judge }),
+    strengths: { type: 'ARRAY', items: TS },
+    priorities: { type: 'ARRAY', items: TS },
+    rewrite: obj({ original: TS, improved: TS }),
+    scriptCheck: TS,
+  };
+  if (withSlides) {
+    props.slides = { type: 'ARRAY', items: obj({ page: { type: 'INTEGER' }, level: { type: 'STRING', enum: ['good', 'warn', 'bad'] }, comment: TS, fix: TS }) };
+    props.flow = TS;
+  }
+  return obj(props);
+}
+const transcriptSchema = obj({ segments: { type: 'ARRAY', items: obj({ start: TN, text: TS }) } });
 
 function blobToBase64(blob) {
   return new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1]); r.onerror = rej; r.readAsDataURL(blob); });
@@ -629,19 +704,31 @@ async function geminiReview({ apiKey, model, promptFor, deck, audioBlob, onStatu
     } catch (e) { onStatus('錄音轉檔失敗，改成只送逐字稿…'); }
   }
   parts.push({ text: promptFor({ imagePages, hasAudio }) + (audioNote ? `\n\n注意：${audioNote}，之後的部分請依逐字稿評。` : '') });
-  const body = { contents: [{ role: 'user', parts }], generationConfig: { responseMimeType: 'application/json', temperature: 0.5 } };
+  const body = { contents: [{ role: 'user', parts }], generationConfig: { responseMimeType: 'application/json', responseSchema: reviewSchema(!!deck), temperature: 0.5 } };
   onStatus(`評審正在${hasAudio ? '聽錄音、' : ''}${imagePages.length ? '看投影片、' : ''}閱卷中…（約 15–60 秒）`);
-  return geminiJson({ apiKey, model, body, onStatus, onModelChange, doing: '評審閱卷中' });
+  return geminiJson({
+    apiKey, model, body, onStatus, onModelChange, doing: '評審閱卷中',
+    validate: r => Array.isArray(r?.rubric) && r.rubric.length > 0 && r.rubric.every(x => x && typeof x.criterion === 'string')
+      && JUDGES.every(j => typeof r?.judges?.[j.id]?.text === 'string' && r.judges[j.id].text.length > 0),
+  });
 }
 
 // 呼叫 Gemini 並取回 JSON。
 // 伺服器忙碌（500/503）或太頻繁（429）→ 等幾秒自動重試；一直忙就換這把金鑰能用的其他模型。
 // 模型下架（404）→ 換模型，並記住新模型。
-async function geminiJson({ apiKey, model, body, onStatus, onModelChange, doing }) {
+// 回傳格式壞掉 → 先自動修復；修不好就自動再問一次。
+async function geminiJson({ apiKey, model, body, onStatus, onModelChange, doing, validate }) {
+  let b = body;
   const call = async m => {
     for (let attempt = 0; ; attempt++) {
-      try { return await gemini(`models/${encodeURIComponent(m)}:generateContent`, apiKey, body); }
+      try { return await gemini(`models/${encodeURIComponent(m)}:generateContent`, apiKey, b); }
       catch (e) {
+        // 少數模型不支援指定輸出格式：拿掉格式要求再送一次
+        if (e.status === 400 && b.generationConfig?.responseSchema && /schema|Unknown name|Invalid JSON payload|response_?mime/i.test(e.raw || '')) {
+          const { responseSchema, ...gc } = b.generationConfig;
+          b = { ...b, generationConfig: gc };
+          continue;
+        }
         const wait = retryWait(e, attempt);
         if (wait == null) throw e;
         onStatus(`Google 伺服器忙碌（${e.status}），${Math.round(wait / 1000)} 秒後自動重試（第 ${attempt + 1} 次）…`);
@@ -649,30 +736,58 @@ async function geminiJson({ apiKey, model, body, onStatus, onModelChange, doing 
       }
     }
   };
-  let data;
-  try { data = await call(model); }
-  catch (e) {
-    const busy = e.status === 429 || e.status >= 500;
-    if (e.status !== 404 && !busy) throw new Error(explainGeminiError(e, model));
-    onStatus(e.status === 404 ? `模型 ${model} 不能用，自動尋找可用的模型…` : `模型 ${model} 一直忙碌，改用其他模型…`);
-    let alts;
-    try { alts = rankModels((await listGeminiModels(apiKey)).filter(m => m.id !== model)).slice(0, 2); }
-    catch (e2) { throw new Error(explainGeminiError(e, model)); }
-    let last = e;
-    for (const alt of alts) {
-      onStatus(`改用 ${alt.id}，${doing}…`);
-      try {
-        data = await call(alt.id);
-        if (e.status === 404) onModelChange && onModelChange(alt.id);   // 只有下架才永久換；忙碌只是這次借用
-        break;
-      } catch (e3) { last = e3; if (!(e3.status === 429 || e3.status >= 500 || e3.status === 404)) break; }
+  const send = async () => {
+    try { return { data: await call(model), used: model }; }
+    catch (e) {
+      const busy = e.status === 429 || e.status >= 500;
+      if (e.status !== 404 && !busy) throw new Error(explainGeminiError(e, model));
+      onStatus(e.status === 404 ? `模型 ${model} 不能用，自動尋找可用的模型…` : `模型 ${model} 一直忙碌，改用其他模型…`);
+      let alts;
+      try { alts = rankModels((await listGeminiModels(apiKey)).filter(m => m.id !== model)).slice(0, 2); }
+      catch (e2) { throw new Error(explainGeminiError(e, model)); }
+      let last = e;
+      for (const alt of alts) {
+        onStatus(`改用 ${alt.id}，${doing}…`);
+        try {
+          const data = await call(alt.id);
+          if (e.status === 404) onModelChange && onModelChange(alt.id);   // 只有下架才永久換；忙碌只是這次借用
+          return { data, used: alt.id };
+        } catch (e3) { last = e3; if (!(e3.status === 429 || e3.status >= 500 || e3.status === 404)) break; }
+      }
+      throw new Error(explainGeminiError(last, model));
     }
-    if (!data) throw new Error(explainGeminiError(last, model));
-  }
-  const cand = data?.candidates?.[0];
-  const text = (cand?.content?.parts || []).filter(p => !p.thought && p.text).map(p => p.text).join('');
-  if (!text) throw new Error(cand?.finishReason === 'SAFETY' ? 'Gemini 因安全設定拒絕回應這段內容。' : 'Gemini 沒有回傳內容，請再試一次。');
-  return parseJsonLoose(text);
+  };
+  const textOf = data => {
+    const cand = data?.candidates?.[0];
+    const text = (cand?.content?.parts || []).filter(p => !p.thought && p.text).map(p => p.text).join('');
+    if (!text) throw new Error(cand?.finishReason === 'SAFETY' ? 'Gemini 因安全設定拒絕回應這段內容。' : 'Gemini 沒有回傳內容，請再試一次。');
+    return { text, cut: cand?.finishReason === 'MAX_TOKENS' };
+  };
+
+  // 讀得懂、而且內容齊全（例如四位評審都有講評）才算成功
+  const accept = text => {
+    const o = parseJsonLoose(text);
+    if (validate && !validate(o)) { const e = new Error('評審回傳的內容不完整'); e.badJson = true; throw e; }
+    return o;
+  };
+  let { data, used } = await send();
+  let first = textOf(data);
+  try { return accept(first.text); }
+  catch (e) { if (!e.badJson) throw e; }
+
+  // 修不好：再問一次，並提醒它注意格式
+  onStatus(`Gemini 回傳的格式有誤，自動重新請它回答…`);
+  const note = first.cut
+    ? '\n\n（注意：上一次的回答太長被截斷了。這次每段文字請精簡一些，並確保輸出完整、合法的 JSON。）'
+    : '\n\n（注意：上一次回傳的 JSON 格式有誤。這次請只輸出合法 JSON；字串裡不要出現英文雙引號，引用原話一律用「」。）';
+  const parts = b.contents[0].parts.slice();
+  const lastText = parts.length - 1;
+  parts[lastText] = { text: parts[lastText].text + note };
+  b = { ...b, contents: [{ ...b.contents[0], parts }] };
+  model = used;
+  ({ data } = await send());
+  try { return accept(textOf(data).text); }
+  catch (e) { if (e.badJson) throw new Error('Gemini 回傳的格式有誤，自動重問一次仍然失敗。請再按一次評比。'); throw e; }
 }
 
 /* ---------- Gemini 聽寫逐字稿：比瀏覽器內建辨識準很多，並附每段開始的秒數 ----------
@@ -724,11 +839,12 @@ ${hints ? `5. 這場演講可能出現的專有名詞（只用來幫你聽對字
 只輸出 JSON：{"segments":[{"start":0,"text":"..."}]}`;
     const body = {
       contents: [{ role: 'user', parts: [{ inline_data: { mime_type: au.mime, data: await blobToBase64(au.blob) } }, { text: prompt }] }],
-      generationConfig: { responseMimeType: 'application/json', temperature: 0 },
+      generationConfig: { responseMimeType: 'application/json', responseSchema: transcriptSchema, temperature: 0 },
     };
     try {
       const r = await geminiJson({
         apiKey, model, body, onModelChange, doing: '聽寫逐字稿',
+        validate: r => Array.isArray(r?.segments),
         onStatus: msg => onStatus(n > 1 ? `第 ${k + 1}／${n} 段：${msg}` : msg),
       });
       results[k] = (Array.isArray(r?.segments) ? r.segments : [])
